@@ -1,0 +1,7 @@
+pandas
+numpy
+requests
+plotly
+streamlit
+pandas-ta
+financialmodelingprep-python

@@ -1,0 +1,24 @@
+# .gitignore content
+
+# Operating System Files
+.DS_Store
+
+# Python Cache and Build Files
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+
+# Environment/Package Management
+venv/
+.venv/
+.conda/
+env/
+.env
+
+# Streamlit Local Cache
+.streamlit/cache/
+
+# Private/Sensitive Data (Do NOT commit your local API keys or secrets file)
+.streamlit/secrets.toml
