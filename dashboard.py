@@ -43,17 +43,23 @@ def run_full_analysis(api_key):
         print(f"Could not fetch S&P 500 list: {e}. Falling back to default.")
     
     all_tech_data, all_fund_data, all_fund_ranks = {}, {}, {}
+    progress_bar = st.progress(0, "Analyzing stocks...")
+    
     for i, ticker in enumerate(watchlist):
+        progress_bar.progress((i + 1) / len(watchlist), f"Analyzing {ticker} ({i+1}/{len(watchlist)})...")
         if i > 0 and i % 5 == 0:
             time.sleep(1)
             
         tech_df = provider.get_daily_stock_data(ticker, '1990-01-01', pd.to_datetime('today').strftime('%Y-%m-%d'))
+        
         if not tech_df.empty and len(tech_df) > 200:
             data_with_indicators, _ = analyzer.run_full_analysis(tech_df.copy())
             all_tech_data[ticker] = data_with_indicators
         
-        if ticker not in ["SPY", "QQQ"]:
-            fund_df = provider.get_daily_fundamental_ratios(ticker)
+        if ticker not in ["SPY", "QQQ"] and not tech_df.empty:
+            # --- CRITICAL OPTIMIZATION: Pass the already-fetched 'tech_df' to the next function ---
+            fund_df = provider.get_daily_fundamental_ratios(ticker, daily_prices=tech_df)
+            
             if not fund_df.empty:
                 for metric in ['P/E', 'P/S', 'PEG']:
                     if metric in fund_df.columns:
@@ -62,6 +68,8 @@ def run_full_analysis(api_key):
                 all_fund_data[ticker] = fund_df
                 _, ranks = analyzer.run_full_fundamental_analysis(fund_df)
                 all_fund_ranks[ticker] = ranks
+
+    progress_bar.empty()
     return all_tech_data, all_fund_data, all_fund_ranks
 
 def get_quick_prices(api_key, tickers):
@@ -78,33 +86,25 @@ def get_quick_prices(api_key, tickers):
     return prices
 
 def create_fundamental_chart(df: pd.DataFrame, metric: str, title: str):
-    # This function is now fixed
     if df.empty or metric not in df.columns: return None
     rank_col = f'{metric}_Rank_Plot'
     fig = make_subplots(specs=[[{"secondary_y": True}]])
-    
     fig.add_trace(go.Scatter(x=df.index, y=df[metric], name=f'{metric} Value', line=dict(color='blue')), secondary_y=False)
-    
     if rank_col in df.columns:
         fig.add_trace(go.Scatter(x=df.index, y=df[rank_col], name='Percentile Rank', line=dict(color='red', dash='dot')), secondary_y=True)
         fig.add_hline(y=25, line_dash="dash", line_color="green", opacity=0.5, secondary_y=True)
         fig.add_hline(y=75, line_dash="dash", line_color="red", opacity=0.5, secondary_y=True)
-    
     fig.update_layout(title_text=title, hovermode="x unified", showlegend=False)
     fig.update_yaxes(title_text=f"<b>{metric} Value</b>", secondary_y=False, showgrid=False)
     fig.update_yaxes(title_text="<b>Percentile Rank (%)</b>", secondary_y=True, range=[0, 100], showgrid=True, gridcolor='#D3D3D3')
-    
-    # --- CRITICAL FIX: Use if/elif to prevent overwriting the y-axis range ---
     if metric == 'P/E':
-        # Make the P/E range dynamic to handle different stocks
-        pe_min = df['P/E'][df['P/E'] > -100].quantile(0.01)
-        pe_max = df['P/E'][df['P/E'] < 200].quantile(0.99)
+        pe_min = df['P/E'][df['P/E'] > -100].quantile(0.01) if not df['P/E'][df['P/E'] > -100].empty else 0
+        pe_max = df['P/E'][df['P/E'] < 200].quantile(0.99) if not df['P/E'][df['P/E'] < 200].empty else 50
         fig.update_yaxes(range=[pe_min, pe_max * 1.1], secondary_y=False)
     elif metric == 'P/S' and 'P/S' in df.columns and not df['P/S'].empty: 
         fig.update_yaxes(range=[0, df['P/S'].quantile(0.99) * 1.1], secondary_y=False)
     elif metric == 'PEG': 
         fig.update_yaxes(range=[-5, 5], secondary_y=False)
-        
     return fig
 
 # --- App Layout ---
@@ -114,7 +114,6 @@ page = st.sidebar.radio("Select a Page", ["Technical Dashboard", "Fundamental Ex
 st.sidebar.markdown("---")
 st.sidebar.subheader("Manual Data Control")
 
-# --- PASSWORD PROTECTION LOGIC ---
 if 'show_password_prompt' not in st.session_state:
     st.session_state.show_password_prompt = False
 
@@ -126,7 +125,6 @@ if st.session_state.show_password_prompt:
         password = st.text_input("Enter Admin Password", type="password")
         submitted = st.form_submit_button("Submit")
         if submitted:
-            # Check password against the one stored in secrets
             try:
                 correct_password = st.secrets["admin_password"]
                 if password == correct_password:
@@ -138,11 +136,10 @@ if st.session_state.show_password_prompt:
             except KeyError:
                 st.error("Admin password is not set in secrets.")
 
-# --- Data Loading ---
 try:
     tech_data, fund_data, fund_ranks = run_full_analysis(FMP_API_KEY)
 except Exception as e:
-    st.error(f"A critical error occurred during the main data analysis: {e}")
+    st.error(f"A critical error occurred during analysis: {e}")
     st.stop()
 
 if not tech_data:
@@ -156,7 +153,6 @@ if st.sidebar.button("Quick Price Refresh"):
     st.session_state.quick_prices = get_quick_prices(FMP_API_KEY, list(tech_data.keys()))
     st.rerun() 
 
-# --- Main App Display ---
 st.title("📈 Trading Model Dashboard")
 st.success(f"Analysis complete for {len(tech_data)} stocks.")
 
