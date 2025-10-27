@@ -6,39 +6,51 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import os
 import time
+from datetime import datetime # NEW: Need datetime for cache-busting logic
 
-# NOTE: These imports assume the file structure is correct, as provided in the project summary.
-# If these imports fail, it means the directory structure is incorrect.
 from data_providers.fmp_provider import FMPProvider
 from analyzers.financial_analyzer import FinancialAnalyzer
 from utils.plotting import create_analysis_chart
 
-# --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Trading Model")
+
+# --- CUSTOM CACHE BUSTING LOGIC ---
+def get_daily_update_key() -> str:
+    """
+    Generates a unique cache key based on the date, forcing a cache refresh 
+    only on weekdays (Monday-Friday) after midnight.
+    This replaces the fixed TTL (Time-To-Live).
+    """
+    now = datetime.now()
+    
+    # We want a fresh run once per day on Mon (0) through Fri (4).
+    # We hold the stable cache key for Sat (5) and Sun (6) to prevent API calls.
+    if now.weekday() >= 5:
+        # For weekends, use the last Friday's date to keep the key stable
+        last_friday = now - pd.offsets.BDay(1)
+        return last_friday.strftime('%Y-%m-%d') + "_WEEKEND_HOLD"
+    else:
+        # For weekdays, use today's date to force a run after midnight UTC
+        return now.strftime('%Y-%m-%d') + "_DAILY_UPDATE"
 
 # --- API Key Management (Secure) ---
 try:
-    # Use Streamlit Secrets (recommended)
     FMP_API_KEY = st.secrets["fmp_api_key"]
 except KeyError:
-    # Fallback to Environment Variable
     FMP_API_KEY = os.environ.get("FMP_API_KEY")
     if not FMP_API_KEY:
         st.error("FMP API Key not configured. Please add 'fmp_api_key' to your secrets or environment.")
         st.stop()
 
 # --- CACHED DATA LOAD (Calculations for all 500+ tickers) ---
-@st.cache_data(ttl=3600, show_spinner="Running full analysis on 500+ stocks (cached for 1 hour)...")
-def run_full_analysis(api_key):
-    """
-    Fetches S&P 500 list, gets historical data, runs technical analysis,
-    and runs fundamental analysis for all available tickers.
-    """
-    print("--- RUNNING FULL ANALYSIS (from Streamlit) ---")
+# NOTE: Removed 'ttl'. The `cache_trigger_key` parameter handles when a full run occurs.
+@st.cache_data(show_spinner="Running full analysis on 500+ stocks (Scheduled Daily Update)...")
+def run_full_analysis(api_key, cache_trigger_key): # NEW: Added the key as a parameter
+    print(f"--- RUNNING FULL ANALYSIS (Cache Key: {cache_trigger_key}) ---")
     provider = FMPProvider(api_key=api_key)
     analyzer = FinancialAnalyzer()
 
-    # Get Tickers: SPY, QQQ + S&P 500 constituents
+    # Get Tickers... (rest of the ticker fetching logic remains the same)
     default_watchlist = ["SPY", "QQQ", "AAPL", "MSFT", "GOOGL", "NVDA", "TSLA", "AMZN"]
     watchlist = default_watchlist
     
@@ -49,7 +61,6 @@ def run_full_analysis(api_key):
         if data:
             tickers = [stock['symbol'] for stock in data]
             if tickers and len(tickers) > 10:
-                # Combine defaults and S&P 500, removing duplicates
                 watchlist = list(dict.fromkeys(default_watchlist + tickers))[:502]
     except Exception as e:
         print(f"Could not fetch S&P 500 list: {e}. Falling back to default.")
@@ -57,13 +68,17 @@ def run_full_analysis(api_key):
     all_tech_data, all_fund_data, all_fund_ranks = {}, {}, {}
     progress_bar = st.progress(0, "Analyzing stocks...")
     
+    # Calculate end date once
+    end_date_str = pd.to_datetime('today').strftime('%Y-%m-%d')
+    
     for i, ticker in enumerate(watchlist):
         progress_bar.progress((i + 1) / len(watchlist), f"Analyzing {ticker} ({i+1}/{len(watchlist)})...")
-        # Throttle to respect FMP limits (5 reqs/sec for free tier, adjusted here)
+        # Throttle to respect FMP limits (1.5s per 5 calls)
         if i > 0 and i % 5 == 0:
             time.sleep(1.5) 
             
-        tech_df = provider.get_daily_stock_data(ticker, '1990-01-01', pd.to_datetime('today').strftime('%Y-%m-%d'))
+        # IMPORTANT: Call the OPTIMIZED data function
+        tech_df = provider.get_daily_stock_data(ticker, '1990-01-01', end_date_str)
         
         if not tech_df.empty and len(tech_df) > 200:
             data_with_indicators, _ = analyzer.run_full_analysis(tech_df.copy())
@@ -87,7 +102,6 @@ def run_full_analysis(api_key):
     return all_tech_data, all_fund_data, all_fund_ranks
 
 def get_quick_prices(api_key, tickers):
-    """Fetches the latest real-time prices for a list of tickers."""
     provider = FMPProvider(api_key=api_key)
     prices = {}
     with st.spinner(f"Fetching latest prices for {len(tickers)} stocks..."):
@@ -100,7 +114,6 @@ def get_quick_prices(api_key, tickers):
     st.toast("Latest prices refreshed!")
     return prices
 
-# --- Fundamental Plotting Function (Unchanged) ---
 def create_fundamental_chart(df: pd.DataFrame, metric: str, title: str):
     if df.empty or metric not in df.columns: return None
     rank_col = f'{metric}_Rank_Plot'
@@ -114,7 +127,7 @@ def create_fundamental_chart(df: pd.DataFrame, metric: str, title: str):
     fig.update_yaxes(title_text=f"<b>{metric} Value</b>", secondary_y=False, showgrid=False)
     fig.update_yaxes(title_text="<b>Percentile Rank (%)</b>", secondary_y=True, range=[0, 100], showgrid=True, gridcolor='#D3D3D3')
     if metric == 'P/E':
-        pe_min = df['P/E'][df['P/E'] > -100].quantile(0.01) if not df['P/E'][df['P/E'] > -100].empty else 0
+        pe_min = df['P/E'][df['P/E'] > -100].quantile(0.01) if not df['P/E'][df['P'/'E'] > -100].empty else 0
         pe_max = df['P/E'][df['P/E'] < 200].quantile(0.99) if not df['P/E'][df['P/E'] < 200].empty else 50
         fig.update_yaxes(range=[pe_min, pe_max * 1.1], secondary_y=False)
     elif metric == 'P/S' and 'P/S' in df.columns and not df['P/S'].empty: 
@@ -152,9 +165,13 @@ if st.session_state.show_password_prompt:
             except KeyError:
                 st.error("Admin password is not set in secrets.")
 
-# Load the core data (cached or newly run)
+# --- MAIN DATA LOAD CALL ---
 try:
-    tech_data, fund_data, fund_ranks = run_full_analysis(FMP_API_KEY)
+    # 1. Get the current cache key (updates daily Mon-Fri)
+    daily_cache_key = get_daily_update_key()
+    
+    # 2. Pass the key to the cached function. If the key changes, the cache is busted.
+    tech_data, fund_data, fund_ranks = run_full_analysis(FMP_API_KEY, daily_cache_key)
 except Exception as e:
     st.error(f"A critical error occurred during analysis: {e}")
     st.stop()
@@ -163,7 +180,6 @@ if not tech_data:
     st.error("The main analysis returned 0 stocks. Check your FMP API Key and limits.")
     st.stop()
     
-# Quick Price Refresh State
 if 'quick_prices' not in st.session_state:
     st.session_state.quick_prices = {}
 
@@ -189,7 +205,6 @@ if st.session_state.quick_prices:
         comparison_df = pd.DataFrame(price_comparison).set_index('Ticker')
         st.dataframe(comparison_df.head(25), use_container_width=True)
 
-# --- TECHNICAL DASHBOARD PAGE ---
 if page == "Technical Dashboard":
     st.header("Technical Signals and Rankings")
     
@@ -217,7 +232,7 @@ if page == "Technical Dashboard":
     if tear_sheet_data:
         tear_sheet_df = pd.DataFrame(tear_sheet_data).set_index('Ticker')
 
-        # --- TREND-FOLLOWING SECTION (UPDATED) ---
+        # --- TREND-FOLLOWING SECTION (UPDATED TO MIRROR REVERSION) ---
         st.header("📈 Trend-Following Signals")
         col1, col2 = st.columns(2)
         
@@ -252,13 +267,11 @@ if page == "Technical Dashboard":
             fund_summary_df = tear_sheet_df[fund_rank_cols].copy().dropna(how='all')
             if not fund_summary_df.empty:
                 fund_summary_df['Overall_Rank'] = fund_summary_df.mean(axis=1, skipna=True)
-                # Lower rank is better (cheaper relative to history)
                 st.dataframe(fund_summary_df.sort_values(by='Overall_Rank').dropna(subset=['Overall_Rank']).head(25), use_container_width=True)
 
         # --- ON-DEMAND TICKER LOOKUP (NEW SECTION) ---
         st.header("🔍 On-Demand Ticker Lookup")
         
-        # Use st.selectbox with a search feature, listing all available tickers
         all_tickers = list(tech_data.keys())
         selected_ticker = st.selectbox(
             "Select or type any analyzed stock ticker:", 
