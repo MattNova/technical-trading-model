@@ -9,7 +9,6 @@ import time
 from datetime import datetime
 
 # --- IMPORTANT: SESSION STATE INITIALIZATION (The most robust location) ---
-# Initialize all necessary session state variables at the absolute top of the script
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
 if 'user_role' not in st.session_state:
@@ -91,13 +90,10 @@ def get_daily_update_key() -> str:
 try:
     FMP_API_KEY = st.secrets["fmp_api_key"]
 except KeyError:
-    FMP_API_KEY = os.environ.get("FMP_API_KEY")
-    if not FMP_API_KEY:
-        st.error("FMP API Key not configured. Please add 'fmp_api_key' to your secrets or environment.")
-        st.stop()
+    st.error("FMP API Key not configured.")
+    st.stop()
 
-
-# --- CACHED DATA LOAD (Calculations for all 500+ tickers) ---
+# --- CACHED DATA LOAD (The section that defines tech_data) ---
 @st.cache_data(show_spinner="Running full analysis on 500+ stocks (Scheduled Daily Update)...")
 def run_full_analysis(api_key, cache_trigger_key): 
     print(f"--- RUNNING FULL ANALYSIS (Cache Key: {cache_trigger_key}) ---")
@@ -177,8 +173,6 @@ def create_fundamental_chart(df: pd.DataFrame, metric: str, title: str):
     fig.update_yaxes(title_text="<b>Percentile Rank (%)</b>", secondary_y=True, range=[0, 100], gridcolor='#D3D3D3')
     
     if metric == 'P/E':
-        # FIX: Robust calculation for P/E axis limits
-        # Coerce the P/E column to numeric, as the error log suggests it contains strings
         df['P/E'] = pd.to_numeric(df['P/E'], errors='coerce') 
         df_filtered = df['P/E'][df['P/E'] > -100]
         
@@ -196,16 +190,30 @@ def create_fundamental_chart(df: pd.DataFrame, metric: str, title: str):
         fig.update_yaxes(range=[-5, 5], secondary_y=False)
     return fig
 
-# --- App Layout ---
+# --- MAIN DATA LOAD CALL (Defining tech_data) ---
+try:
+    daily_cache_key = get_daily_update_key()
+    tech_data, fund_data, fund_ranks = run_full_analysis(FMP_API_KEY, daily_cache_key)
+except Exception as e:
+    st.error(f"A critical error occurred during analysis: {e}")
+    st.stop()
+
+if not tech_data:
+    st.error("The main analysis returned 0 stocks. Check your FMP API Key and limits.")
+    st.stop()
+    
+# --- RESTRUCTURED CONTENT STARTS HERE ---
+# All code below this point has access to tech_data, fund_data, and fund_ranks
+
 st.sidebar.title("App Controls")
 page = st.sidebar.radio("Select a Page", ["Technical Dashboard", "Fundamental Explorer"])
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Manual Data Control")
 
-# --- ADMIN CONTROL: ONLY SHOW IF USER IS ADMIN ---
+
+# --- ADMIN CONTROL: ONLY SHOW IF USER IS ADMIN (Now runs AFTER tech_data is defined) ---
 if st.session_state.user_role == 'admin':
-    # The show_password_prompt state is already initialized at the top
     
     if st.sidebar.button("Run FULL Analysis (Clear Cache)"):
         st.session_state.show_password_prompt = True
@@ -233,8 +241,9 @@ if st.session_state.user_role == 'admin':
     st.sidebar.markdown("---")
     st.sidebar.subheader("Manual Data Override (Admin)")
 
-    # --- NEW MANUAL INPUT FORM ---
+    # --- NEW MANUAL INPUT FORM (Requires tech_data.keys()) ---
     with st.sidebar.form("manual_price_form"):
+        # This is the line that caused the error, but is now safe to run
         tickers_to_override = st.selectbox(
             "Select Tickers for Manual Price Input:", 
             options=list(tech_data.keys()),
@@ -243,7 +252,9 @@ if st.session_state.user_role == 'admin':
         
         override_date = st.date_input("Date of New Closing Price:", pd.to_datetime('today') - pd.offsets.BDay(1), key='manual_date_input')
         
-        override_price = st.number_input(f"Closing Price for {st.session_state.manual_ticker_select}:", min_value=0.01, key='manual_price_input')
+        # Access the selected ticker from session state after the form has run once
+        selected_ticker_for_label = st.session_state.get('manual_ticker_select', 'TICKER') 
+        override_price = st.number_input(f"Closing Price for {selected_ticker_for_label}:", min_value=0.01, key='manual_price_input')
         
         submitted = st.form_submit_button("SAVE MANUAL PRICE")
         
@@ -274,19 +285,6 @@ else:
         st.toast("Price data loaded from the most recent scheduled analysis.")
     
 
-
-# --- MAIN DATA LOAD CALL ---
-try:
-    daily_cache_key = get_daily_update_key()
-    tech_data, fund_data, fund_ranks = run_full_analysis(FMP_API_KEY, daily_cache_key)
-except Exception as e:
-    st.error(f"A critical error occurred during analysis: {e}")
-    st.stop()
-
-if not tech_data:
-    st.error("The main analysis returned 0 stocks. Check your FMP API Key and limits.")
-    st.stop()
-    
 
 st.title("📈 Trading Model Dashboard")
 st.success(f"Analysis complete for {len(tech_data)} stocks.")
