@@ -28,14 +28,10 @@ st.set_page_config(layout="wide", page_title="Trading Model")
 # --- LOGIN/AUTHENTICATION LOGIC ---
 def get_secret_passwords():
     passwords = {}
-    try:
-        passwords['admin'] = st.secrets["admin_password"]
-    except KeyError:
-        st.error("Configuration Error: Admin password not found.")
-    try:
-        passwords['viewer'] = st.secrets["viewer_password"]
-    except KeyError:
-        st.error("Configuration Error: Viewer password not found.")
+    try: passwords['admin'] = st.secrets["admin_password"]
+    except KeyError: st.error("Configuration Error: Admin password not found.")
+    try: passwords['viewer'] = st.secrets["viewer_password"]
+    except KeyError: st.error("Configuration Error: Viewer password not found.")
     return passwords
 
 def check_password():
@@ -65,14 +61,30 @@ if not st.session_state.authenticated:
 
 # --- END LOGIN ---
 
-# --- DATA & CACHE LOGIC ---
-def get_daily_update_key():
+# --- DATA & CACHE LOGIC (WITH PAUSE SWITCH & STATUS) ---
+def get_cache_key_and_status() -> (str, str, bool):
+    """
+    Generates a daily cache key and a user-facing status message.
+    Returns: (cache_key, status_message, is_paused_flag)
+    """
+    try:
+        pause_flag_str = st.secrets.get("PAUSE_AUTOMATIC_UPDATES", "False").lower()
+        if pause_flag_str == "true":
+            message = "WARNING: Automatic daily updates are PAUSED by the administrator. Data is not current."
+            return "UPDATES_PAUSED_STATIC_KEY", message, True
+    except Exception:
+        pass
+
     now = datetime.now()
     if now.weekday() >= 5:
         last_friday = now - pd.offsets.BDay(1)
-        return last_friday.strftime('%Y-%m-%d') + "_WEEKEND_HOLD"
+        date_str = last_friday.strftime('%Y-%m-%d')
+        message = f"Data last updated: {date_str} (Weekend Hold)"
+        return date_str + "_WEEKEND_HOLD", message, False
     else:
-        return now.strftime('%Y-%m-%d') + "_DAILY_UPDATE"
+        date_str = now.strftime('%Y-%m-%d')
+        message = f"Data last updated: {date_str}"
+        return date_str + "_DAILY_UPDATE", message, False
 
 try:
     FMP_API_KEY = st.secrets["fmp_api_key"]
@@ -82,6 +94,7 @@ except KeyError:
 
 @st.cache_data(show_spinner="Running full analysis on 500+ stocks (Scheduled Daily Update)...")
 def run_full_analysis(api_key, cache_trigger_key): 
+    # This function's internal logic remains unchanged
     print(f"--- RUNNING FULL ANALYSIS (Cache Key: {cache_trigger_key}) ---")
     provider = FMPProvider(api_key=api_key)
     analyzer = FinancialAnalyzer()
@@ -171,8 +184,8 @@ def create_fundamental_chart(df: pd.DataFrame, metric: str, title: str):
     return fig
 
 try:
-    daily_cache_key = get_daily_update_key()
-    tech_data, fund_data, fund_ranks = run_full_analysis(FMP_API_KEY, daily_cache_key)
+    cache_key, status_message, is_paused = get_cache_key_and_status()
+    tech_data, fund_data, fund_ranks = run_full_analysis(FMP_API_KEY, cache_key)
 except Exception as e:
     st.error(f"A critical error occurred during analysis: {e}")
     st.stop()
@@ -184,7 +197,6 @@ if not tech_data:
 # --- UI & CONTENT LAYOUT ---
 st.sidebar.title("App Controls")
 page = st.sidebar.radio("Select a Page", ["Technical Dashboard", "Fundamental Explorer", "Model Explanation"])
-
 st.sidebar.markdown("---")
 st.sidebar.subheader("Manual Data Override (All Users)")
 with st.sidebar.form("manual_price_form"):
@@ -197,7 +209,6 @@ with st.sidebar.form("manual_price_form"):
     selected_ticker_for_label = st.session_state.get('manual_ticker_select', 'TICKER') 
     override_price = st.number_input(f"Closing Price for {selected_ticker_for_label}:", min_value=0.01, key='manual_price_input')
     submitted = st.form_submit_button("SAVE MANUAL PRICE")
-    
     if submitted:
         provider = FMPProvider(api_key=FMP_API_KEY)
         manual_df = provider.get_manual_prices()
@@ -226,11 +237,8 @@ if st.session_state.user_role == 'admin':
                         st.session_state.show_password_prompt = False
                         st.cache_data.clear()
                         st.rerun()
-                    else:
-                        st.error("Incorrect password")
-                except KeyError:
-                    st.error("Admin password is not set.")
-    
+                    else: st.error("Incorrect password")
+                except KeyError: st.error("Admin password is not set.")
     if st.sidebar.button("Quick Price Refresh"):
         st.session_state.quick_prices = get_quick_prices(FMP_API_KEY, list(tech_data.keys()))
         st.rerun() 
@@ -238,12 +246,19 @@ else:
     st.sidebar.markdown("*(Admin controls hidden)*")
 
 st.title("📈 Trading Model Dashboard")
-st.success(f"Analysis complete for {len(tech_data)} stocks.")
+
+# --- NEW: Display Status Banner ---
+if is_paused:
+    st.error(status_message)
+else:
+    st.success(status_message)
+
 if st.session_state.user_role == 'admin':
     st.markdown("*(Logged in as Admin)*")
 else:
     st.markdown("*(Logged in as Viewer)*")
 
+# The rest of the page logic remains the same...
 if st.session_state.quick_prices:
     st.markdown("### Current Price Snapshot")
     price_comparison = []
@@ -264,14 +279,7 @@ if page == "Technical Dashboard":
     for ticker, df in tech_data.items():
         if df.empty: continue
         latest = df.iloc[-1]
-        row = { 
-            'Ticker': ticker, 
-            'Trend_Score': latest.get('Trend_Score'), 
-            'Reversion_Score': latest.get('Reversion_Score'), 
-            'Close': f"${latest.get('close'):.2f}", 
-            'RSI': f"{latest.get('RSI_14'):.2f}", 
-            'Stoch': f"{latest.get('STOCHk_14_3_3'):.2f}"
-        }
+        row = { 'Ticker': ticker, 'Trend_Score': latest.get('Trend_Score'), 'Reversion_Score': latest.get('Reversion_Score'), 'Close': f"${latest.get('close'):.2f}", 'RSI': f"{latest.get('RSI_14'):.2f}", 'Stoch': f"{latest.get('STOCHk_14_3_3'):.2f}"}
         if ticker in fund_ranks:
             summary, _ = FinancialAnalyzer().run_full_fundamental_analysis(fund_data.get(ticker, pd.DataFrame()))
             for metric in ['P/E', 'P/S', 'PEG']:
@@ -281,7 +289,6 @@ if page == "Technical Dashboard":
     
     if tear_sheet_data:
         tear_sheet_df = pd.DataFrame(tear_sheet_data).set_index('Ticker')
-
         st.header("📈 Trend-Following Signals (Max Score: +4 / -4)")
         col1, col2 = st.columns(2)
         with col1: 
@@ -290,7 +297,6 @@ if page == "Technical Dashboard":
         with col2: 
             st.subheader("Strong Short Trends (Bottom 25)")
             st.dataframe(tear_sheet_df.sort_values(by="Trend_Score", ascending=True).head(25), use_container_width=True)
-
         st.header("📉 Mean Reversion Signals (Max Score: +4 / -4)") 
         col1, col2 = st.columns(2)
         with col1: 
@@ -299,7 +305,6 @@ if page == "Technical Dashboard":
         with col2: 
             st.subheader("Oversold (Bullish)")
             st.dataframe(tear_sheet_df[tear_sheet_df['Reversion_Score'] > 0].sort_values(by="Reversion_Score", ascending=False).head(25), use_container_width=True)
-
         st.header("💎 Fundamental Valuation Rankings (Long-Term)") 
         fund_rank_cols = [c for c in tear_sheet_df.columns if 'Long_Term_Rank' in c]
         if fund_rank_cols:
@@ -307,7 +312,6 @@ if page == "Technical Dashboard":
             if not fund_summary_df.empty:
                 fund_summary_df['Overall_Rank'] = fund_summary_df.mean(axis=1, skipna=True)
                 st.dataframe(fund_summary_df.sort_values(by='Overall_Rank').dropna(subset=['Overall_Rank']).head(25), use_container_width=True)
-
         st.header("🔍 On-Demand Ticker Lookup")
         all_tickers = list(tech_data.keys())
         selected_ticker = st.selectbox("Select or type any analyzed stock ticker:", options=all_tickers, index=all_tickers.index("SPY") if "SPY" in all_tickers else 0)
@@ -315,69 +319,17 @@ if page == "Technical Dashboard":
             st.plotly_chart(create_analysis_chart(selected_ticker, tech_data[selected_ticker]), use_container_width=True)
         else:
             st.warning("Please select a ticker to view its detailed technical analysis chart.")
-
 elif page == "Fundamental Explorer":
     st.title("💎 Fundamental Valuation Explorer")
     ticker_list = list(fund_data.keys())
     if not ticker_list: 
-        st.warning("No stocks with fundamental data were found."); 
-        st.stop()
-        
+        st.warning("No stocks with fundamental data were found."); st.stop()
     selected_ticker = st.selectbox("Select a stock for detailed analysis:", ticker_list)
     st.header(f"Valuation Ranking Summary for {selected_ticker}")
     ranks = fund_ranks.get(selected_ticker, {})
     raw_data = fund_data.get(selected_ticker)
-    
     summary_rows = []
     for metric in ['P/E', 'P/S', 'PEG']:
         metric_ranks = ranks.get(metric, {})
         row = {'Metric': metric}
-        if raw_data is not None and metric in raw_data.columns and not raw_data.empty:
-            row['Current'] = f"{raw_data[metric].iloc[-1]:.2f}"
-        timeframes = ['30 days', '90 days', '120 days', '1 year', '3 years', '5 years', '10 years', 'Full History']
-        for timeframe in timeframes:
-            rank_val = metric_ranks.get(timeframe)
-            row[timeframe] = f"{rank_val:.1f}%" if pd.notna(rank_val) else "N/A"
-        summary_rows.append(row)
-    st.dataframe(pd.DataFrame(summary_rows).set_index('Metric'), use_container_width=True)
-    
-    st.header(f"Historical Ratio Charts for {selected_ticker} (Daily)")
-    if raw_data is not None:
-        tab1, tab2, tab3 = st.tabs(["P/E Ratio", "P/S Ratio", "PEG Ratio"])
-        with tab1:
-            fig = create_fundamental_chart(raw_data, 'P/E', f"{selected_ticker} Daily P/E Ratio & Rank")
-            if fig: st.plotly_chart(fig, use_container_width=True)
-            else: st.warning("No P/E data to plot.")
-        with tab2:
-            fig = create_fundamental_chart(raw_data, 'P/S', f"{selected_ticker} Daily P/S Ratio & Rank")
-            if fig: st.plotly_chart(fig, use_container_width=True)
-            else: st.warning("No P/S data to plot.")
-        with tab3:
-            fig = create_fundamental_chart(raw_data, 'PEG', f"{selected_ticker} Daily PEG Ratio & Rank")
-            if fig: st.plotly_chart(fig, use_container_width=True)
-            else: st.warning("No PEG data to plot.")
-
-elif page == "Model Explanation":
-    st.title("Model Scoring Explanation")
-    st.header("Trading Score Methodology")
-    st.markdown("This model uses two core scores: **Trend Score** and **Reversion Score**, both ranging from **+4 to -4**.")
-    
-    st.subheader("📈 Trend Score Components (Max: +4 / -4)")
-    st.markdown("""
-    | Indicator | Score | Condition |
-    | :--- | :--- | :--- |
-    | **MA Ribbon (5/10/15/20)** | **+1** / **-1** | Perfect Bullish (`5>10>15>20`) or Bearish (`5<10<15<20`) Stacking |
-    | **50-Day SMA** | **+1** / **-1** | Close Price is Above / Below 50-Day SMA |
-    | **200-Day SMA** | **+1** / **-1** | Close Price is Above / Below 200-Day SMA |
-    | **MACD** | **+1** / **-1** | MACD Line is Above / Below Signal Line |
-    """)
-
-    st.subheader("📉 Reversion Score Components (Max: +4 / -4)")
-    st.markdown("""
-    | Indicator | Score | Condition |
-    | :--- | :--- | :--- |
-    | **RSI (14)** | **+2** / **+1** | RSI < 30 (Extreme) or < 40 (Oversold) |
-    | | **-1** / **-2** | RSI > 60 or > 70 (Extreme) (Overbought) |
-    | **Stochastics (%K)** | **+1** / **-1** | %K is Below 20 (Oversold) / Above 80 (Overbought) |
-    | **Bollinger Bands**| **+1** / **-1** | Close Price is Below Lower Band / Above Upper Band |
-    """)
+        if raw_data is not None and metric in raw_data.columns a
