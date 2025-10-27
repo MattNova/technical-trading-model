@@ -28,14 +28,10 @@ st.set_page_config(layout="wide", page_title="Trading Model")
 # --- LOGIN/AUTHENTICATION LOGIC ---
 def get_secret_passwords():
     passwords = {}
-    try:
-        passwords['admin'] = st.secrets["admin_password"]
-    except KeyError:
-        st.error("Configuration Error: Admin password not found.")
-    try:
-        passwords['viewer'] = st.secrets["viewer_password"]
-    except KeyError:
-        st.error("Configuration Error: Viewer password not found.")
+    try: passwords['admin'] = st.secrets["admin_password"]
+    except KeyError: st.error("Configuration Error: Admin password not found.")
+    try: passwords['viewer'] = st.secrets["viewer_password"]
+    except KeyError: st.error("Configuration Error: Viewer password not found.")
     return passwords
 
 def check_password():
@@ -65,30 +61,14 @@ if not st.session_state.authenticated:
 
 # --- END LOGIN ---
 
-# --- DATA & CACHE LOGIC (WITH PAUSE SWITCH & STATUS) ---
-def get_cache_key_and_status() -> (str, str, bool):
-    """
-    Generates a daily cache key and a user-facing status message.
-    Returns: (cache_key, status_message, is_paused_flag)
-    """
-    try:
-        pause_flag_str = st.secrets.get("PAUSE_AUTOMATIC_UPDATES", "False").lower()
-        if pause_flag_str == "true":
-            message = "WARNING: Automatic daily updates are PAUSED by the administrator. Data is not current."
-            return "UPDATES_PAUSED_STATIC_KEY", message, True
-    except Exception:
-        pass
-
+# --- DATA & CACHE LOGIC ---
+def get_daily_update_key():
     now = datetime.now()
     if now.weekday() >= 5:
         last_friday = now - pd.offsets.BDay(1)
-        date_str = last_friday.strftime('%Y-%m-%d')
-        message = f"Data last updated: {date_str} (Weekend Hold)"
-        return date_str + "_WEEKEND_HOLD", message, False
+        return last_friday.strftime('%Y-%m-%d') + "_WEEKEND_HOLD"
     else:
-        date_str = now.strftime('%Y-%m-%d')
-        message = f"Data last updated: {date_str}"
-        return date_str + "_DAILY_UPDATE", message, False
+        return now.strftime('%Y-%m-%d') + "_DAILY_UPDATE"
 
 try:
     FMP_API_KEY = st.secrets["fmp_api_key"]
@@ -187,8 +167,8 @@ def create_fundamental_chart(df: pd.DataFrame, metric: str, title: str):
     return fig
 
 try:
-    cache_key, status_message, is_paused = get_cache_key_and_status()
-    tech_data, fund_data, fund_ranks = run_full_analysis(FMP_API_KEY, cache_key)
+    daily_cache_key = get_daily_update_key()
+    tech_data, fund_data, fund_ranks = run_full_analysis(FMP_API_KEY, daily_cache_key)
 except Exception as e:
     st.error(f"A critical error occurred during analysis: {e}")
     st.stop()
@@ -249,13 +229,7 @@ else:
     st.sidebar.markdown("*(Admin controls hidden)*")
 
 st.title("📈 Trading Model Dashboard")
-
-# --- NEW: Display Status Banner ---
-if is_paused:
-    st.error(status_message)
-else:
-    st.success(status_message)
-
+st.success(f"Analysis complete for {len(tech_data)} stocks.")
 if st.session_state.user_role == 'admin':
     st.markdown("*(Logged in as Admin)*")
 else:
@@ -357,7 +331,37 @@ elif page == "Fundamental Explorer":
             fig = create_fundamental_chart(raw_data, 'PEG', f"{selected_ticker} Daily PEG Ratio & Rank")
             if fig: st.plotly_chart(fig, use_container_width=True)
             else: st.warning("No PEG data to plot.")
+
 elif page == "Model Explanation":
     st.title("Model Scoring Explanation")
     st.header("Trading Score Methodology")
-    st.markdown("This model uses two core scores: **Tre
+
+    # --- FIX: Changed single quotes to triple quotes for multi-line string ---
+    st.markdown("""
+    This model uses two core scores: **Trend Score** and **Reversion Score**, both ranging from **+4 to -4**.
+    
+    A **Positive Score** indicates a bullish signal (Buy/Long).
+    A **Negative Score** indicates a bearish signal (Sell/Short).
+    """)
+
+    st.subheader("📈 Trend Score Components (Max: +4 / -4)")
+    # --- FIX: Changed single quotes to triple quotes for multi-line string ---
+    st.markdown("""
+    | Indicator | Score | Condition |
+    | :--- | :--- | :--- |
+    | **MA Ribbon (5/10/15/20)** | **+1** / **-1** | Perfect Bullish (`5>10>15>20`) or Bearish (`5<10<15<20`) Stacking |
+    | **50-Day SMA** | **+1** / **-1** | Close Price is Above / Below 50-Day SMA |
+    | **200-Day SMA** | **+1** / **-1** | Close Price is Above / Below 200-Day SMA |
+    | **MACD** | **+1** / **-1** | MACD Line is Above / Below Signal Line |
+    """)
+
+    st.subheader("📉 Reversion Score Components (Max: +4 / -4)")
+    # --- FIX: Changed single quotes to triple quotes for multi-line string ---
+    st.markdown("""
+    | Indicator | Score | Condition |
+    | :--- | :--- | :--- |
+    | **RSI (14)** | **+2** / **+1** | RSI < 30 (Extreme) or < 40 (Oversold) |
+    | | **-1** / **-2** | RSI > 60 or > 70 (Extreme) (Overbought) |
+    | **Stochastics (%K)** | **+1** / **-1** | %K is Below 20 (Oversold) / Above 80 (Overbought) |
+    | **Bollinger Bands**| **+1** / **-1** | Close Price is Below Lower Band / Above Upper Band |
+    """)
