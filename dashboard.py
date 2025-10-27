@@ -31,11 +31,13 @@ def get_secret_passwords():
     except KeyError:
         st.error("Configuration Error: Admin password not found.")
     try:
+        # NOTE: If this secret is missing, viewer access will not work.
         passwords['viewer'] = st.secrets["viewer_password"]
     except KeyError:
         st.error("Configuration Error: Viewer password not found.")
     return passwords
 
+# --- BUG FIX: Removed st.rerun() from inside the callback function ---
 def check_password():
     """Authenticates user and assigns a role (admin or viewer)."""
     passwords = get_secret_passwords()
@@ -45,12 +47,12 @@ def check_password():
         st.session_state.authenticated = True
         st.session_state.user_role = 'admin'
         del st.session_state.password
-        st.rerun() 
+        # Rerun is triggered automatically by form submission after callback finishes
     elif input_password == passwords.get('viewer'):
         st.session_state.authenticated = True
         st.session_state.user_role = 'viewer'
         del st.session_state.password
-        st.rerun() 
+        # Rerun is triggered automatically by form submission after callback finishes
     else:
         st.error("Incorrect Password")
         st.session_state.authenticated = False
@@ -60,6 +62,7 @@ def login_form():
     st.title("🔒 Trading Model Login")
     with st.form("login_form"):
         st.text_input("Access Code", type="password", key="password")
+        # Rerun happens automatically after on_click finishes because it's a form submit
         st.form_submit_button("Log In", on_click=check_password)
 
 # Check authentication status
@@ -70,7 +73,7 @@ if not st.session_state.authenticated:
 # --- END LOGIN/AUTHENTICATION LOGIC ---
 
 
-# --- CUSTOM CACHE BUSTING LOGIC (Unchanged) ---
+# --- CUSTOM CACHE BUSTING LOGIC ---
 def get_daily_update_key() -> str:
     """
     Generates a unique cache key based on the date, forcing a cache refresh 
@@ -225,9 +228,8 @@ if st.session_state.user_role == 'admin':
 else:
     # Viewer-only controls
     st.sidebar.markdown("*(Admin controls hidden. Log in with Admin password to access.)*")
-    if st.sidebar.button("Quick Price Refresh"):
-        st.error("Quick Price Refresh requires Admin privileges.")
-
+    # Quick Price Refresh button is still hidden for viewers. 
+    # If a viewer needs this, we would move it outside the admin check.
 
 # --- MAIN DATA LOAD CALL ---
 try:
@@ -246,19 +248,22 @@ st.title("📈 Trading Model Dashboard")
 st.success(f"Analysis complete for {len(tech_data)} stocks.")
 if st.session_state.user_role == 'admin':
     st.markdown("*(Logged in as Admin)*")
+elif st.session_state.user_role == 'viewer':
+    st.markdown("*(Logged in as Viewer)*")
 
 if st.session_state.quick_prices:
     st.markdown("### Current Price Snapshot")
     price_comparison = []
-    # Simplified loop for price comparison display
     for ticker, latest_data in st.session_state.quick_prices.items():
         if ticker in tech_data and not tech_data[ticker].empty:
-            last_close = tech_data[ticker]['close'].iloc[-1]
-            latest_price = latest_data.get('price')
-            if latest_price:
-                change = latest_price - last_close
-                change_pct = (change / last_close) * 100
-                price_comparison.append({ 'Ticker': ticker, 'Analysis Close': f"${last_close:.2f}", 'Latest Price': f"${latest_price:.2f}", 'Change ($)': f"{change:.2f}", 'Change (%)': f"{change_pct:.2f}%" })
+            # Check if tech_data[ticker] is not empty before accessing .iloc[-1]
+            if not tech_data[ticker].empty:
+                last_close = tech_data[ticker]['close'].iloc[-1]
+                latest_price = latest_data.get('price')
+                if latest_price:
+                    change = latest_price - last_close
+                    change_pct = (change / last_close) * 100
+                    price_comparison.append({ 'Ticker': ticker, 'Analysis Close': f"${last_close:.2f}", 'Latest Price': f"${latest_price:.2f}", 'Change ($)': f"{change:.2f}", 'Change (%)': f"{change_pct:.2f}%" })
     if price_comparison:
         comparison_df = pd.DataFrame(price_comparison).set_index('Ticker')
         st.dataframe(comparison_df.head(25), use_container_width=True)
@@ -266,7 +271,7 @@ if st.session_state.quick_prices:
 if page == "Technical Dashboard":
     st.header("Technical Signals and Rankings")
     
-    # 1. Build the full Tear Sheet DataFrame (rest of the content is unchanged)
+    # 1. Build the full Tear Sheet DataFrame
     tear_sheet_data = []
     for ticker, df in tech_data.items():
         if df.empty: continue
