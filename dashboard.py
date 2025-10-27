@@ -8,6 +8,18 @@ import os
 import time
 from datetime import datetime
 
+# --- IMPORTANT: SESSION STATE INITIALIZATION (The most robust location) ---
+# Initialize all necessary session state variables at the absolute top of the script
+if 'authenticated' not in st.session_state:
+    st.session_state.authenticated = False
+if 'user_role' not in st.session_state:
+    st.session_state.user_role = 'viewer'
+if 'show_password_prompt' not in st.session_state:
+    st.session_state.show_password_prompt = False
+if 'quick_prices' not in st.session_state:
+    st.session_state.quick_prices = {}
+# --- END SESSION STATE INITIALIZATION ---
+
 from data_providers.fmp_provider import FMPProvider
 from analyzers.financial_analyzer import FinancialAnalyzer
 from utils.plotting import create_analysis_chart
@@ -17,12 +29,6 @@ st.set_page_config(layout="wide", page_title="Trading Model")
 
 # --- LOGIN/AUTHENTICATION LOGIC (Two-Tier Security) ---
 
-# Initialize session state for login status and user role
-if 'authenticated' not in st.session_state:
-    st.session_state.authenticated = False
-if 'user_role' not in st.session_state:
-    st.session_state.user_role = 'viewer' # Default lowest access
-
 def get_secret_passwords():
     """Helper to safely retrieve passwords from secrets."""
     passwords = {}
@@ -31,13 +37,11 @@ def get_secret_passwords():
     except KeyError:
         st.error("Configuration Error: Admin password not found.")
     try:
-        # NOTE: If this secret is missing, viewer access will not work.
         passwords['viewer'] = st.secrets["viewer_password"]
     except KeyError:
         st.error("Configuration Error: Viewer password not found.")
     return passwords
 
-# --- BUG FIX: Removed st.rerun() from inside the callback function ---
 def check_password():
     """Authenticates user and assigns a role (admin or viewer)."""
     passwords = get_secret_passwords()
@@ -47,12 +51,10 @@ def check_password():
         st.session_state.authenticated = True
         st.session_state.user_role = 'admin'
         del st.session_state.password
-        # Rerun is triggered automatically by form submission after callback finishes
     elif input_password == passwords.get('viewer'):
         st.session_state.authenticated = True
         st.session_state.user_role = 'viewer'
         del st.session_state.password
-        # Rerun is triggered automatically by form submission after callback finishes
     else:
         st.error("Incorrect Password")
         st.session_state.authenticated = False
@@ -62,7 +64,6 @@ def login_form():
     st.title("🔒 Trading Model Login")
     with st.form("login_form"):
         st.text_input("Access Code", type="password", key="password")
-        # Rerun happens automatically after on_click finishes because it's a form submit
         st.form_submit_button("Log In", on_click=check_password)
 
 # Check authentication status
@@ -173,10 +174,14 @@ def create_fundamental_chart(df: pd.DataFrame, metric: str, title: str):
         fig.add_hline(y=75, line_dash="dash", line_color="red", opacity=0.5, secondary_y=True)
     fig.update_layout(title_text=title, hovermode="x unified", showlegend=False)
     fig.update_yaxes(title_text=f"<b>{metric} Value</b>", secondary_y=False, showgrid=False)
-    fig.update_yaxes(title_text="<b>Percentile Rank (%)</b>", secondary_y=True, range=[0, 100], showgrid=True, gridcolor='#D3D3D3')
+    fig.update_yaxes(title_text="<b>Percentile Rank (%)</b>", secondary_y=True, range=[0, 100], gridcolor='#D3D3D3')
     
     if metric == 'P/E':
+        # FIX: Robust calculation for P/E axis limits
+        # Coerce the P/E column to numeric, as the error log suggests it contains strings
+        df['P/E'] = pd.to_numeric(df['P/E'], errors='coerce') 
         df_filtered = df['P/E'][df['P/E'] > -100]
+        
         if not df_filtered.empty:
             pe_min = df_filtered.quantile(0.01)
             pe_max_filtered = df_filtered[df_filtered < 200]
@@ -200,9 +205,8 @@ st.sidebar.subheader("Manual Data Control")
 
 # --- ADMIN CONTROL: ONLY SHOW IF USER IS ADMIN ---
 if st.session_state.user_role == 'admin':
-    if 'show_password_prompt' not in st.session_state:
-        st.session_state.show_password_prompt = False
-
+    # The show_password_prompt state is already initialized at the top
+    
     if st.sidebar.button("Run FULL Analysis (Clear Cache)"):
         st.session_state.show_password_prompt = True
 
@@ -225,11 +229,51 @@ if st.session_state.user_role == 'admin':
     if st.sidebar.button("Quick Price Refresh"):
         st.session_state.quick_prices = get_quick_prices(FMP_API_KEY, list(tech_data.keys()))
         st.rerun() 
+    
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Manual Data Override (Admin)")
+
+    # --- NEW MANUAL INPUT FORM ---
+    with st.sidebar.form("manual_price_form"):
+        tickers_to_override = st.selectbox(
+            "Select Tickers for Manual Price Input:", 
+            options=list(tech_data.keys()),
+            key='manual_ticker_select'
+        )
+        
+        override_date = st.date_input("Date of New Closing Price:", pd.to_datetime('today') - pd.offsets.BDay(1), key='manual_date_input')
+        
+        override_price = st.number_input(f"Closing Price for {st.session_state.manual_ticker_select}:", min_value=0.01, key='manual_price_input')
+        
+        submitted = st.form_submit_button("SAVE MANUAL PRICE")
+        
+        if submitted:
+            provider = FMPProvider(api_key=FMP_API_KEY)
+            manual_df = provider.get_manual_prices()
+            date_ts = pd.to_datetime(override_date)
+            
+            if manual_df.empty:
+                manual_df = pd.DataFrame(columns=[st.session_state.manual_ticker_select], index=pd.to_datetime([date_ts]))
+            
+            if st.session_state.manual_ticker_select not in manual_df.columns:
+                 manual_df[st.session_state.manual_ticker_select] = np.nan
+            
+            manual_df.loc[date_ts, st.session_state.manual_ticker_select] = override_price
+            
+            provider.save_manual_prices(manual_df.dropna(axis=1, how='all'))
+            
+            st.success(f"Saved manual price of ${override_price:.2f} for {st.session_state.manual_ticker_select} on {override_date}.")
+            st.warning("Data will be used in the next scheduled analysis (or after clearing cache).")
+            
+    st.sidebar.markdown("---")
+# --- END ADMIN CONTROL ---
 else:
     # Viewer-only controls
     st.sidebar.markdown("*(Admin controls hidden. Log in with Admin password to access.)*")
-    # Quick Price Refresh button is still hidden for viewers. 
-    # If a viewer needs this, we would move it outside the admin check.
+    if st.sidebar.button("Quick Price Refresh (Cached Data)"):
+        st.toast("Price data loaded from the most recent scheduled analysis.")
+    
+
 
 # --- MAIN DATA LOAD CALL ---
 try:
@@ -251,22 +295,22 @@ if st.session_state.user_role == 'admin':
 elif st.session_state.user_role == 'viewer':
     st.markdown("*(Logged in as Viewer)*")
 
+# --- START QUICK PRICE SNAPSHOT ---
 if st.session_state.quick_prices:
     st.markdown("### Current Price Snapshot")
     price_comparison = []
     for ticker, latest_data in st.session_state.quick_prices.items():
         if ticker in tech_data and not tech_data[ticker].empty:
-            # Check if tech_data[ticker] is not empty before accessing .iloc[-1]
-            if not tech_data[ticker].empty:
-                last_close = tech_data[ticker]['close'].iloc[-1]
-                latest_price = latest_data.get('price')
-                if latest_price:
-                    change = latest_price - last_close
-                    change_pct = (change / last_close) * 100
-                    price_comparison.append({ 'Ticker': ticker, 'Analysis Close': f"${last_close:.2f}", 'Latest Price': f"${latest_price:.2f}", 'Change ($)': f"{change:.2f}", 'Change (%)': f"{change_pct:.2f}%" })
+            last_close = tech_data[ticker]['close'].iloc[-1]
+            latest_price = latest_data.get('price')
+            if latest_price:
+                change = latest_price - last_close
+                change_pct = (change / last_close) * 100
+                price_comparison.append({ 'Ticker': ticker, 'Analysis Close': f"${last_close:.2f}", 'Latest Price': f"${latest_price:.2f}", 'Change ($)': f"{change:.2f}", 'Change (%)': f"{change_pct:.2f}%" })
     if price_comparison:
         comparison_df = pd.DataFrame(price_comparison).set_index('Ticker')
         st.dataframe(comparison_df.head(25), use_container_width=True)
+# --- END QUICK PRICE SNAPSHOT ---
 
 if page == "Technical Dashboard":
     st.header("Technical Signals and Rankings")
