@@ -7,27 +7,38 @@ from plotly.subplots import make_subplots
 import os
 import time
 
+# NOTE: These imports assume the file structure is correct, as provided in the project summary.
+# If these imports fail, it means the directory structure is incorrect.
 from data_providers.fmp_provider import FMPProvider
 from analyzers.financial_analyzer import FinancialAnalyzer
 from utils.plotting import create_analysis_chart
 
+# --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Trading Model")
 
 # --- API Key Management (Secure) ---
 try:
+    # Use Streamlit Secrets (recommended)
     FMP_API_KEY = st.secrets["fmp_api_key"]
 except KeyError:
+    # Fallback to Environment Variable
     FMP_API_KEY = os.environ.get("FMP_API_KEY")
     if not FMP_API_KEY:
-        st.error("API Key not configured.")
+        st.error("FMP API Key not configured. Please add 'fmp_api_key' to your secrets or environment.")
         st.stop()
 
+# --- CACHED DATA LOAD (Calculations for all 500+ tickers) ---
 @st.cache_data(ttl=3600, show_spinner="Running full analysis on 500+ stocks (cached for 1 hour)...")
 def run_full_analysis(api_key):
+    """
+    Fetches S&P 500 list, gets historical data, runs technical analysis,
+    and runs fundamental analysis for all available tickers.
+    """
     print("--- RUNNING FULL ANALYSIS (from Streamlit) ---")
     provider = FMPProvider(api_key=api_key)
     analyzer = FinancialAnalyzer()
 
+    # Get Tickers: SPY, QQQ + S&P 500 constituents
     default_watchlist = ["SPY", "QQQ", "AAPL", "MSFT", "GOOGL", "NVDA", "TSLA", "AMZN"]
     watchlist = default_watchlist
     
@@ -38,6 +49,7 @@ def run_full_analysis(api_key):
         if data:
             tickers = [stock['symbol'] for stock in data]
             if tickers and len(tickers) > 10:
+                # Combine defaults and S&P 500, removing duplicates
                 watchlist = list(dict.fromkeys(default_watchlist + tickers))[:502]
     except Exception as e:
         print(f"Could not fetch S&P 500 list: {e}. Falling back to default.")
@@ -47,8 +59,9 @@ def run_full_analysis(api_key):
     
     for i, ticker in enumerate(watchlist):
         progress_bar.progress((i + 1) / len(watchlist), f"Analyzing {ticker} ({i+1}/{len(watchlist)})...")
+        # Throttle to respect FMP limits (5 reqs/sec for free tier, adjusted here)
         if i > 0 and i % 5 == 0:
-            time.sleep(1)
+            time.sleep(1.5) 
             
         tech_df = provider.get_daily_stock_data(ticker, '1990-01-01', pd.to_datetime('today').strftime('%Y-%m-%d'))
         
@@ -56,13 +69,14 @@ def run_full_analysis(api_key):
             data_with_indicators, _ = analyzer.run_full_analysis(tech_df.copy())
             all_tech_data[ticker] = data_with_indicators
         
+        # Only fetch fundamentals for non-index tickers
         if ticker not in ["SPY", "QQQ"] and not tech_df.empty:
-            # --- CRITICAL OPTIMIZATION: Pass the already-fetched 'tech_df' to the next function ---
             fund_df = provider.get_daily_fundamental_ratios(ticker, daily_prices=tech_df)
             
             if not fund_df.empty:
                 for metric in ['P/E', 'P/S', 'PEG']:
                     if metric in fund_df.columns:
+                        # Pre-calculate rank for plotting in Fundamental Explorer
                         fund_df[f'{metric}_Rank_Plot'] = fund_df[metric].expanding(min_periods=20).apply(
                             lambda x: (x < x.iloc[-1]).sum() / len(x) * 100 if len(x) > 1 else np.nan, raw=False)
                 all_fund_data[ticker] = fund_df
@@ -73,18 +87,20 @@ def run_full_analysis(api_key):
     return all_tech_data, all_fund_data, all_fund_ranks
 
 def get_quick_prices(api_key, tickers):
+    """Fetches the latest real-time prices for a list of tickers."""
     provider = FMPProvider(api_key=api_key)
     prices = {}
     with st.spinner(f"Fetching latest prices for {len(tickers)} stocks..."):
         for i, ticker in enumerate(tickers):
             if i > 0 and i % 5 == 0:
-                time.sleep(1)
+                time.sleep(1.5)
             price_data = provider.get_latest_price(ticker)
             if price_data:
                 prices[ticker] = price_data
     st.toast("Latest prices refreshed!")
     return prices
 
+# --- Fundamental Plotting Function (Unchanged) ---
 def create_fundamental_chart(df: pd.DataFrame, metric: str, title: str):
     if df.empty or metric not in df.columns: return None
     rank_col = f'{metric}_Rank_Plot'
@@ -136,6 +152,7 @@ if st.session_state.show_password_prompt:
             except KeyError:
                 st.error("Admin password is not set in secrets.")
 
+# Load the core data (cached or newly run)
 try:
     tech_data, fund_data, fund_ranks = run_full_analysis(FMP_API_KEY)
 except Exception as e:
@@ -146,6 +163,7 @@ if not tech_data:
     st.error("The main analysis returned 0 stocks. Check your FMP API Key and limits.")
     st.stop()
     
+# Quick Price Refresh State
 if 'quick_prices' not in st.session_state:
     st.session_state.quick_prices = {}
 
@@ -171,52 +189,118 @@ if st.session_state.quick_prices:
         comparison_df = pd.DataFrame(price_comparison).set_index('Ticker')
         st.dataframe(comparison_df.head(25), use_container_width=True)
 
+# --- TECHNICAL DASHBOARD PAGE ---
 if page == "Technical Dashboard":
     st.header("Technical Signals and Rankings")
+    
+    # 1. Build the full Tear Sheet DataFrame
     tear_sheet_data = []
     for ticker, df in tech_data.items():
         if df.empty: continue
         latest = df.iloc[-1]
-        row = { 'Ticker': ticker, 'Trend_Score': latest.get('Trend_Score'), 'Reversion_Score': latest.get('Reversion_Score'), 'Close': f"${latest.get('close'):.2f}", 'RSI': f"{latest.get('RSI_14'):.2f}", 'Stoch': f"{latest.get('STOCHk_14_3_3'):.2f}"}
+        row = { 
+            'Ticker': ticker, 
+            'Trend_Score': latest.get('Trend_Score'), 
+            'Reversion_Score': latest.get('Reversion_Score'), 
+            'Close': f"${latest.get('close'):.2f}", 
+            'RSI': f"{latest.get('RSI_14'):.2f}", 
+            'Stoch': f"{latest.get('STOCHk_14_3_3'):.2f}"
+        }
         if ticker in fund_ranks:
+            # We must instantiate the analyzer here to get the summary from the existing data
             summary, _ = FinancialAnalyzer().run_full_fundamental_analysis(fund_data.get(ticker, pd.DataFrame()))
             for metric in ['P/E', 'P/S', 'PEG']:
                 row[f'{metric}_Short_Term_Rank'] = summary.get(f'{metric}_Short_Term_Rank')
                 row[f'{metric}_Long_Term_Rank'] = summary.get(f'{metric}_Long_Term_Rank')
         tear_sheet_data.append(row)
+    
     if tear_sheet_data:
         tear_sheet_df = pd.DataFrame(tear_sheet_data).set_index('Ticker')
-        st.header("📈 Trend-Following Signals"); st.dataframe(tear_sheet_df.sort_values(by="Trend_Score", ascending=False).head(25), use_container_width=True)
-        st.header("📉 Mean Reversion Signals"); col1, col2 = st.columns(2)
-        with col1: st.subheader("Overbought (Bearish)"); st.dataframe(tear_sheet_df[tear_sheet_df['Reversion_Score'] < 0].sort_values(by="Reversion_Score").head(25), use_container_width=True)
-        with col2: st.subheader("Oversold (Bullish)"); st.dataframe(tear_sheet_df[tear_sheet_df['Reversion_Score'] > 0].sort_values(by="Reversion_Score", ascending=False).head(25), use_container_width=True)
-        st.header("💎 Fundamental Valuation Rankings (Long-Term)"); fund_rank_cols = [c for c in tear_sheet_df.columns if 'Long_Term_Rank' in c]
+
+        # --- TREND-FOLLOWING SECTION (UPDATED) ---
+        st.header("📈 Trend-Following Signals")
+        col1, col2 = st.columns(2)
+        
+        # Long Trend (Highest Positive Trend_Score)
+        with col1: 
+            st.subheader("Strong Long Trends (Top 25)")
+            long_trends = tear_sheet_df.sort_values(by="Trend_Score", ascending=False).head(25)
+            st.dataframe(long_trends, use_container_width=True)
+            
+        # Short Trend (Lowest Negative Trend_Score)
+        with col2: 
+            st.subheader("Strong Short Trends (Bottom 25)")
+            # Sorting ASC will put the most negative scores (e.g., -3) at the top
+            short_trends = tear_sheet_df.sort_values(by="Trend_Score", ascending=True).head(25)
+            st.dataframe(short_trends, use_container_width=True)
+
+        # --- MEAN REVERSION SECTION (UNCHNAGED) ---
+        st.header("📉 Mean Reversion Signals") 
+        col1, col2 = st.columns(2)
+        
+        with col1: 
+            st.subheader("Overbought (Bearish)")
+            st.dataframe(tear_sheet_df[tear_sheet_df['Reversion_Score'] < 0].sort_values(by="Reversion_Score").head(25), use_container_width=True)
+        with col2: 
+            st.subheader("Oversold (Bullish)")
+            st.dataframe(tear_sheet_df[tear_sheet_df['Reversion_Score'] > 0].sort_values(by="Reversion_Score", ascending=False).head(25), use_container_width=True)
+
+        # --- FUNDAMENTAL RANKINGS (UNCHNAGED) ---
+        st.header("💎 Fundamental Valuation Rankings (Long-Term)") 
+        fund_rank_cols = [c for c in tear_sheet_df.columns if 'Long_Term_Rank' in c]
         if fund_rank_cols:
             fund_summary_df = tear_sheet_df[fund_rank_cols].copy().dropna(how='all')
             if not fund_summary_df.empty:
                 fund_summary_df['Overall_Rank'] = fund_summary_df.mean(axis=1, skipna=True)
+                # Lower rank is better (cheaper relative to history)
                 st.dataframe(fund_summary_df.sort_values(by='Overall_Rank').dropna(subset=['Overall_Rank']).head(25), use_container_width=True)
-        st.header("🔬 Chart Explorer"); selected_ticker = st.selectbox("Select a stock to chart:", list(tech_data.keys()))
+
+        # --- ON-DEMAND TICKER LOOKUP (NEW SECTION) ---
+        st.header("🔍 On-Demand Ticker Lookup")
+        
+        # Use st.selectbox with a search feature, listing all available tickers
+        all_tickers = list(tech_data.keys())
+        selected_ticker = st.selectbox(
+            "Select or type any analyzed stock ticker:", 
+            options=all_tickers, 
+            index=all_tickers.index("SPY") if "SPY" in all_tickers else 0 # Default to SPY or first ticker
+        )
+        
         if selected_ticker and selected_ticker in tech_data:
             st.plotly_chart(create_analysis_chart(selected_ticker, tech_data[selected_ticker]), use_container_width=True)
+        else:
+            st.warning("Please select a ticker to view its detailed technical analysis chart.")
 
+
+# --- FUNDAMENTAL EXPLORER PAGE (UNCHNAGED) ---
 elif page == "Fundamental Explorer":
     st.title("💎 Fundamental Valuation Explorer")
     ticker_list = list(fund_data.keys())
-    if not ticker_list: st.warning("No stocks with fundamental data were found."); st.stop()
+    if not ticker_list: 
+        st.warning("No stocks with fundamental data were found (SPY/QQQ excluded)."); 
+        st.stop()
+        
     selected_ticker = st.selectbox("Select a stock for detailed analysis:", ticker_list)
-    st.header(f"Valuation Ranking Summary for {selected_ticker}"); ranks = fund_ranks.get(selected_ticker, {}); raw_data = fund_data.get(selected_ticker)
+    
+    st.header(f"Valuation Ranking Summary for {selected_ticker}")
+    ranks = fund_ranks.get(selected_ticker, {})
+    raw_data = fund_data.get(selected_ticker)
+    
     summary_rows = []
     for metric in ['P/E', 'P/S', 'PEG']:
-        metric_ranks = ranks.get(metric, {}); row = {'Metric': metric}
+        metric_ranks = ranks.get(metric, {})
+        row = {'Metric': metric}
         if raw_data is not None and metric in raw_data.columns and not raw_data.empty:
             row['Current'] = f"{raw_data[metric].iloc[-1]:.2f}"
+        
         timeframes = ['30 days', '90 days', '120 days', '1 year', '3 years', '5 years', '10 years', 'Full History']
         for timeframe in timeframes:
             rank_val = metric_ranks.get(timeframe)
             row[timeframe] = f"{rank_val:.1f}%" if pd.notna(rank_val) else "N/A"
         summary_rows.append(row)
+        
     st.dataframe(pd.DataFrame(summary_rows).set_index('Metric'), use_container_width=True)
+    
     st.header(f"Historical Ratio Charts for {selected_ticker} (Daily)")
     if raw_data is not None:
         tab1, tab2, tab3 = st.tabs(["P/E Ratio", "P/S Ratio", "PEG Ratio"])
