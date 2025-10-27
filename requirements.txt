@@ -1,7 +1,8 @@
+# requirements.txt
+streamlit
 pandas
 numpy
-requests
 plotly
-streamlit
+requests
 pandas-ta
 financialmodelingprep-python
