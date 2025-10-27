@@ -87,19 +87,16 @@ class FMPProvider(BaseDataProvider):
     def get_daily_fundamental_ratios(self, ticker: str, daily_prices: pd.DataFrame) -> pd.DataFrame:
         """
         Calculates daily fundamental ratios.
-        OPTIMIZED: This function now ACCEPTS the daily_prices DataFrame instead of fetching it again.
+        OPTIMIZED: This function now ACCEPTS the daily_prices DataFrame.
         """
         quarterly_fundamentals = self.get_historical_fundamentals(ticker)
 
-        # Check if either of the required DataFrames is empty
         if daily_prices.empty or quarterly_fundamentals.empty: 
             return pd.DataFrame()
         
-        # Prepare DataFrames for merging
         daily_prices_reset = daily_prices.reset_index()
         quarterly_fundamentals_reset = quarterly_fundamentals.reset_index()
 
-        # Merge the daily price data with the quarterly fundamental data
         merged_df = pd.merge_asof(
             daily_prices_reset.sort_values('date'), 
             quarterly_fundamentals_reset.sort_values('date'), 
@@ -108,7 +105,6 @@ class FMPProvider(BaseDataProvider):
         )
         merged_df.set_index('date', inplace=True)
         
-        # Calculate the ratios
         merged_df['P/E'] = merged_df['close'] / merged_df['EPS_TTM']
         merged_df['P/S'] = (merged_df['close'] * merged_df['shares_out']) / merged_df['Sales_TTM']
         merged_df['PEG'] = merged_df['P/E'] / (merged_df['eps_growth'] * 100)
