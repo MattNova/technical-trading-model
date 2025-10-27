@@ -211,8 +211,47 @@ page = st.sidebar.radio("Select a Page", ["Technical Dashboard", "Fundamental Ex
 st.sidebar.markdown("---")
 st.sidebar.subheader("Manual Data Control")
 
+# --- MANUAL DATA OVERRIDE (MOVED OUTSIDE ADMIN CHECK) ---
+st.sidebar.subheader("Manual Data Override (All Users)")
+# The code below is the manual input form, now available to all logged-in users
+with st.sidebar.form("manual_price_form"):
+    # This is the line that caused the error, but is now safe to run
+    tickers_to_override = st.selectbox(
+        "Select Tickers for Manual Price Input:", 
+        options=list(tech_data.keys()),
+        key='manual_ticker_select'
+    )
+    
+    override_date = st.date_input("Date of New Closing Price:", pd.to_datetime('today') - pd.offsets.BDay(1), key='manual_date_input')
+    
+    selected_ticker_for_label = st.session_state.get('manual_ticker_select', 'TICKER') 
+    override_price = st.number_input(f"Closing Price for {selected_ticker_for_label}:", min_value=0.01, key='manual_price_input')
+    
+    submitted = st.form_submit_button("SAVE MANUAL PRICE")
+    
+    if submitted:
+        provider = FMPProvider(api_key=FMP_API_KEY)
+        manual_df = provider.get_manual_prices()
+        date_ts = pd.to_datetime(override_date)
+        
+        if manual_df.empty:
+            manual_df = pd.DataFrame(columns=[st.session_state.manual_ticker_select], index=pd.to_datetime([date_ts]))
+        
+        if st.session_state.manual_ticker_select not in manual_df.columns:
+             manual_df[st.session_state.manual_ticker_select] = np.nan
+        
+        manual_df.loc[date_ts, st.session_state.manual_ticker_select] = override_price
+        
+        provider.save_manual_prices(manual_df.dropna(axis=1, how='all'))
+        
+        st.success(f"Saved manual price of ${override_price:.2f} for {st.session_state.manual_ticker_select} on {override_date}.")
+        st.warning("Data will be used in the next scheduled analysis (or after clearing cache).")
+        
+st.sidebar.markdown("---")
+# --- END MANUAL DATA OVERRIDE ---
 
-# --- ADMIN CONTROL: ONLY SHOW IF USER IS ADMIN (Now runs AFTER tech_data is defined) ---
+
+# --- ADMIN CONTROL: ONLY SHOW IF USER IS ADMIN ---
 if st.session_state.user_role == 'admin':
     
     if st.sidebar.button("Run FULL Analysis (Clear Cache)"):
@@ -238,44 +277,6 @@ if st.session_state.user_role == 'admin':
         st.session_state.quick_prices = get_quick_prices(FMP_API_KEY, list(tech_data.keys()))
         st.rerun() 
     
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Manual Data Override (Admin)")
-
-    # --- NEW MANUAL INPUT FORM (Requires tech_data.keys()) ---
-    with st.sidebar.form("manual_price_form"):
-        # This is the line that caused the error, but is now safe to run
-        tickers_to_override = st.selectbox(
-            "Select Tickers for Manual Price Input:", 
-            options=list(tech_data.keys()),
-            key='manual_ticker_select'
-        )
-        
-        override_date = st.date_input("Date of New Closing Price:", pd.to_datetime('today') - pd.offsets.BDay(1), key='manual_date_input')
-        
-        # Access the selected ticker from session state after the form has run once
-        selected_ticker_for_label = st.session_state.get('manual_ticker_select', 'TICKER') 
-        override_price = st.number_input(f"Closing Price for {selected_ticker_for_label}:", min_value=0.01, key='manual_price_input')
-        
-        submitted = st.form_submit_button("SAVE MANUAL PRICE")
-        
-        if submitted:
-            provider = FMPProvider(api_key=FMP_API_KEY)
-            manual_df = provider.get_manual_prices()
-            date_ts = pd.to_datetime(override_date)
-            
-            if manual_df.empty:
-                manual_df = pd.DataFrame(columns=[st.session_state.manual_ticker_select], index=pd.to_datetime([date_ts]))
-            
-            if st.session_state.manual_ticker_select not in manual_df.columns:
-                 manual_df[st.session_state.manual_ticker_select] = np.nan
-            
-            manual_df.loc[date_ts, st.session_state.manual_ticker_select] = override_price
-            
-            provider.save_manual_prices(manual_df.dropna(axis=1, how='all'))
-            
-            st.success(f"Saved manual price of ${override_price:.2f} for {st.session_state.manual_ticker_select} on {override_date}.")
-            st.warning("Data will be used in the next scheduled analysis (or after clearing cache).")
-            
     st.sidebar.markdown("---")
 # --- END ADMIN CONTROL ---
 else:
