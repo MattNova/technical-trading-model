@@ -28,10 +28,14 @@ st.set_page_config(layout="wide", page_title="Trading Model")
 # --- LOGIN/AUTHENTICATION LOGIC ---
 def get_secret_passwords():
     passwords = {}
-    try: passwords['admin'] = st.secrets["admin_password"]
-    except KeyError: st.error("Configuration Error: Admin password not found.")
-    try: passwords['viewer'] = st.secrets["viewer_password"]
-    except KeyError: st.error("Configuration Error: Viewer password not found.")
+    try:
+        passwords['admin'] = st.secrets["admin_password"]
+    except KeyError:
+        st.error("Configuration Error: Admin password not found.")
+    try:
+        passwords['viewer'] = st.secrets["viewer_password"]
+    except KeyError:
+        st.error("Configuration Error: Viewer password not found.")
     return passwords
 
 def check_password():
@@ -94,7 +98,6 @@ except KeyError:
 
 @st.cache_data(show_spinner="Running full analysis on 500+ stocks (Scheduled Daily Update)...")
 def run_full_analysis(api_key, cache_trigger_key): 
-    # This function's internal logic remains unchanged
     print(f"--- RUNNING FULL ANALYSIS (Cache Key: {cache_trigger_key}) ---")
     provider = FMPProvider(api_key=api_key)
     analyzer = FinancialAnalyzer()
@@ -258,7 +261,6 @@ if st.session_state.user_role == 'admin':
 else:
     st.markdown("*(Logged in as Viewer)*")
 
-# The rest of the page logic remains the same...
 if st.session_state.quick_prices:
     st.markdown("### Current Price Snapshot")
     price_comparison = []
@@ -332,4 +334,30 @@ elif page == "Fundamental Explorer":
     for metric in ['P/E', 'P/S', 'PEG']:
         metric_ranks = ranks.get(metric, {})
         row = {'Metric': metric}
-        if raw_data is not None and metric in raw_data.columns a
+        if raw_data is not None and metric in raw_data.columns and not raw_data.empty:
+            row['Current'] = f"{raw_data[metric].iloc[-1]:.2f}"
+        timeframes = ['30 days', '90 days', '120 days', '1 year', '3 years', '5 years', '10 years', 'Full History']
+        for timeframe in timeframes:
+            rank_val = metric_ranks.get(timeframe)
+            row[timeframe] = f"{rank_val:.1f}%" if pd.notna(rank_val) else "N/A"
+        summary_rows.append(row)
+    st.dataframe(pd.DataFrame(summary_rows).set_index('Metric'), use_container_width=True)
+    st.header(f"Historical Ratio Charts for {selected_ticker} (Daily)")
+    if raw_data is not None:
+        tab1, tab2, tab3 = st.tabs(["P/E Ratio", "P/S Ratio", "PEG Ratio"])
+        with tab1:
+            fig = create_fundamental_chart(raw_data, 'P/E', f"{selected_ticker} Daily P/E Ratio & Rank")
+            if fig: st.plotly_chart(fig, use_container_width=True)
+            else: st.warning("No P/E data to plot.")
+        with tab2:
+            fig = create_fundamental_chart(raw_data, 'P/S', f"{selected_ticker} Daily P/S Ratio & Rank")
+            if fig: st.plotly_chart(fig, use_container_width=True)
+            else: st.warning("No P/S data to plot.")
+        with tab3:
+            fig = create_fundamental_chart(raw_data, 'PEG', f"{selected_ticker} Daily PEG Ratio & Rank")
+            if fig: st.plotly_chart(fig, use_container_width=True)
+            else: st.warning("No PEG data to plot.")
+elif page == "Model Explanation":
+    st.title("Model Scoring Explanation")
+    st.header("Trading Score Methodology")
+    st.markdown("This model uses two core scores: **Tre
