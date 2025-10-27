@@ -5,8 +5,9 @@ import os
 from datetime import datetime, timedelta
 
 # Define a local directory for storing the cached historical stock data
-# This directory will be created in the root of your project
 DATA_DIR = "local_historical_data"
+# NEW: Define a file for storing manual daily price overrides
+MANUAL_PRICE_FILE = os.path.join(DATA_DIR, "manual_daily_prices.csv")
 
 class BaseDataProvider:
     """An empty base class for data provider inheritance."""
@@ -16,10 +17,26 @@ class FMPProvider(BaseDataProvider):
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.base_url = "https://financialmodelingprep.com/api/v3"
-        # Ensure the local data directory exists
         if not os.path.exists(DATA_DIR):
             os.makedirs(DATA_DIR)
+
+    # NEW FUNCTION: Handles reading manual data overrides
+    def get_manual_prices(self) -> pd.DataFrame:
+        """Loads the manual price override file."""
+        if os.path.exists(MANUAL_PRICE_FILE):
+            try:
+                df = pd.read_csv(MANUAL_PRICE_FILE, index_col='date', parse_dates=True)
+                return df
+            except Exception as e:
+                print(f"Error loading manual prices: {e}")
+                return pd.DataFrame()
+        return pd.DataFrame()
     
+    # NEW FUNCTION: Handles saving manual data overrides
+    def save_manual_prices(self, df: pd.DataFrame):
+        """Saves the manual price override data."""
+        df.to_csv(MANUAL_PRICE_FILE)
+
     def _get_ticker_file_path(self, ticker: str) -> str:
         """Returns the local path for a ticker's data file."""
         return os.path.join(DATA_DIR, f"{ticker.upper()}_daily.csv")
@@ -27,7 +44,7 @@ class FMPProvider(BaseDataProvider):
     def get_daily_stock_data(self, ticker: str, start_date_hint: str, end_date: str) -> pd.DataFrame:
         """
         Loads local historical data and only fetches new data (delta) from FMP API.
-        This optimizes API calls significantly by using local storage first.
+        Includes a fallback to manual prices on API failure.
         """
         file_path = self._get_ticker_file_path(ticker)
         local_df = pd.DataFrame()
@@ -36,17 +53,12 @@ class FMPProvider(BaseDataProvider):
         # 1. Check for and Load Local Data
         if os.path.exists(file_path):
             try:
-                # Read local file, ensuring index is datetime and sorted
                 local_df = pd.read_csv(file_path, index_col='date', parse_dates=True)
                 local_df.sort_index(inplace=True)
                 
-                # Determine the start date for the API call (Day after the last local record)
                 last_local_date = local_df.index.max().strftime('%Y-%m-%d')
-                
-                # Add one day to the last local date for the new fetch
                 delta_start_date = (datetime.strptime(last_local_date, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
                 
-                # If the delta start date is today or later, we have the latest data
                 if delta_start_date >= end_date:
                     return local_df[['open', 'high', 'low', 'close', 'volume']]
                 
@@ -54,8 +66,6 @@ class FMPProvider(BaseDataProvider):
                 
             except Exception as e:
                 print(f"Error loading local data for {ticker}: {e}. Performing full fetch.")
-                # If local load fails, start date remains the full history hint (1990-01-01)
-        # Else: file does not exist, start date remains the full history hint (1990-01-01)
 
         # 2. Fetch Delta/Full Data from API
         try:
@@ -63,40 +73,62 @@ class FMPProvider(BaseDataProvider):
             params = {"from": start_date, "to": end_date, "apikey": self.api_key}
             
             response = requests.get(url, params=params, timeout=15)
-            response.raise_for_status()
+            response.raise_for_status() # This is where the error will be raised
             
+            # If successful, process, merge, and save data
             data = response.json()
             if not data:
-                # No new data since last run, return local data if it exists
                 return local_df[['open', 'high', 'low', 'close', 'volume']] if not local_df.empty else pd.DataFrame()
             
-            # Process new API data
             api_df = pd.DataFrame(data)
             api_df['date'] = pd.to_datetime(api_df['date'])
             api_df.set_index('date', inplace=True)
             api_df.sort_index(inplace=True)
             api_df = api_df[['open', 'high', 'low', 'close', 'volume']]
             
-            # 3. Merge and Save
             if not local_df.empty:
-                # Concatenate local and new data, dropping any duplicates that might occur 
-                # (e.g. if the last local date and the first API date overlap slightly)
                 final_df = pd.concat([local_df, api_df]).drop_duplicates(keep='last')
             else:
                 final_df = api_df
             
             final_df.sort_index(inplace=True)
-            
-            # Save the updated data locally for the next run (CRITICAL step for delta-fetch)
             final_df.to_csv(file_path)
             
             return final_df
 
-        except Exception as e:
-            print(f"Error fetching API data for {ticker} from {start_date}: {e}")
-            # Fallback: return the local data even if the API fetch failed
-            return local_df[['open', 'high', 'low', 'close', 'volume']] if not local_df.empty else pd.DataFrame()
+        except requests.exceptions.HTTPError as he:
+            # Fallback for API errors (like 429 Rate Limit)
+            print(f"HTTP Error fetching data for {ticker} from {start_date}: {he}")
+            if local_df.empty: return pd.DataFrame()
+            
+            # --- MANUAL FALLBACK LOGIC ---
+            manual_prices = self.get_manual_prices()
+            if not manual_prices.empty and ticker in manual_prices.columns:
+                # Get the latest manual price and date
+                latest_manual_date = manual_prices.index.max()
+                latest_close_value = manual_prices[ticker].iloc[-1]
 
+                # Create a single row DataFrame for the manual data point
+                manual_row = pd.DataFrame([{
+                    'open': latest_close_value, 
+                    'high': latest_close_value, 
+                    'low': latest_close_value, 
+                    'close': latest_close_value, 
+                    'volume': 0 
+                }], index=[latest_manual_date], columns=['open', 'high', 'low', 'close', 'volume'])
+                
+                # Merge manual data with local data
+                final_df = pd.concat([local_df, manual_row]).drop_duplicates(keep='last')
+                final_df.sort_index(inplace=True)
+                return final_df
+            
+            # Fallback to only returning old local data if no manual data is present
+            return local_df[['open', 'high', 'low', 'close', 'volume']] 
+
+        except Exception as e:
+            print(f"General Error fetching API data for {ticker} from {start_date}: {e}")
+            return local_df[['open', 'high', 'low', 'close', 'volume']] if not local_df.empty else pd.DataFrame()
+            
     def get_latest_price(self, ticker: str) -> dict:
         try:
             url = f"{self.base_url}/quote/{ticker}"
